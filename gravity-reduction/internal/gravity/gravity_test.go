@@ -173,6 +173,97 @@ func TestNormalGravityValues(t *testing.T) {
 	}
 }
 
+// normalGravityAnchors 是按国际正常重力公式标准式
+//
+//	γ(φ) = 9.780318·(1 + 5.3024e-3·sin²φ − 5.9e-6·sin²2φ)   [m/s²]
+//
+// 独立计算并换算到 mGal 的锚点值，0–90° 每 5° 一个，重点覆盖中纬度段。
+// 历史上 sin²(2φ) 项符号被写反时，赤道与两极结果不变（sin2φ 在该两处为 0），
+// 中纬度 γ 却被稳定抬高，45° 处达 ~11.5 mGal——下表对此逐点钉死。
+var normalGravityAnchors = []struct {
+	phi       float64 // 纬度，度
+	gammaMGal float64 // 标准正常重力，mGal
+}{
+	{0, 978031.800000},
+	{5, 978071.018858},
+	{10, 978187.499489},
+	{15, 978377.747892},
+	{20, 978636.052726},
+	{25, 978954.650490},
+	{30, 979323.951163},
+	{35, 979732.818692},
+	{40, 980168.899103},
+	{45, 980618.987521},
+	{50, 981069.423935},
+	{55, 981506.506363},
+	{60, 981916.909072},
+	{65, 982288.092922},
+	{70, 982608.694720},
+	{75, 982868.882731},
+	{80, 983060.666313},
+	{85, 983178.148961},
+	{90, 983217.715816},
+}
+
+// 锚点值保留到 1e-6 mGal，容差取 1e-3 mGal：
+// 比舍入噪声宽三个量级，又比曾出现的 11.5 mGal 偏差窄四个量级。
+const anchorTolMGal = 1e-3
+
+// 回归：任意纬度的正常重力都必须与国际正常重力公式标准值逐点对上，
+// 中纬度（30°–60°）是历史上出错且赤道/两极测试照不到的地带。
+func TestNormalGravity_MidLatitudeAnchorValues(t *testing.T) {
+	for _, c := range normalGravityAnchors {
+		got := MS2ToMGal(NormalGravity(c.phi))
+		if d := got - c.gammaMGal; math.Abs(d) > anchorTolMGal {
+			t.Fatalf("φ=%v° 正常重力应为 %.4f mGal，得到 %.4f mGal（偏差 %.4f mGal）",
+				c.phi, c.gammaMGal, got, d)
+		}
+		// 南纬同纬度必须取同一标准值。
+		gotS := MS2ToMGal(NormalGravity(-c.phi))
+		if d := gotS - c.gammaMGal; math.Abs(d) > anchorTolMGal {
+			t.Fatalf("φ=%v°（南纬）正常重力应为 %.4f mGal，得到 %.4f mGal", -c.phi, c.gammaMGal, gotS)
+		}
+	}
+}
+
+// 回归：sin²(2φ) 项必须把中纬度 γ 向下拉，而不是向上抬。
+// 45° 处 sin²φ=0.5、sin²(2φ)=1 同时取到极值，对该项符号最敏感：
+// γ(45°) 必须恰比 g_e(1+β1·sin²45°) 低 g_e·β2。
+func TestNormalGravity_SecondHarmonicPullsDown(t *testing.T) {
+	withoutSecondHarmonic := normalGravityEquator * (1 + beta1*0.5)
+	want := withoutSecondHarmonic - normalGravityEquator*beta2
+	got := NormalGravity(45)
+	if !approxEq(got, want) {
+		t.Fatalf("γ(45°) 应为 %v m/s^2（第二谐波项取负），得到 %v", want, got)
+	}
+	if got >= withoutSecondHarmonic {
+		t.Fatalf("γ(45°)=%v 必须低于仅含 sin²φ 项的值 %v（sin²(2φ) 项符号疑被写反）",
+			got, withoutSecondHarmonic)
+	}
+}
+
+// 回归（全链路）：固定 gobs/h/ρ，让纬度从赤道扫到两极，
+// 每个纬度的布格异常都必须等于 gobs − γ标准(φ) + Δg_FA − Δg_B。
+// γ 在纬度上的任何偏差都会一比一漏进异常，本用例把整条链在
+// 0–90° 范围（含最敏感的 45° 附近）钉在标准正常重力公式上。
+func TestBouguerAnomaly_LatitudeSweepMatchesStandardGamma(t *testing.T) {
+	base := Observation{Gobs: 9.802640, H: 500, Phi: 0, Density: 2.67}
+	gobsMGal := MS2ToMGal(base.Gobs)
+	fa := FreeAirCorrection(base.H)
+	bc := BouguerCorrection(base.Density, base.H)
+
+	for _, c := range normalGravityAnchors {
+		obs := base
+		obs.Phi = c.phi
+		got := ReducePoint(obs).BouguerAnomaly.MGal
+		want := gobsMGal - c.gammaMGal + fa - bc
+		if d := got - want; math.Abs(d) > anchorTolMGal {
+			t.Fatalf("φ=%v° 布格异常应为 %.4f mGal，得到 %.4f mGal（偏差 %.4f mGal）",
+				c.phi, want, got, d)
+		}
+	}
+}
+
 // 高程扫描：每个点都必须由真实公式独立算出，
 // 且 γ 不变、FA 与 B 随 h 线性变化，不允许退化成写死的直线/常数。
 func TestScanHeights_PointwiseFormula(t *testing.T) {
