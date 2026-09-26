@@ -173,6 +173,79 @@ func TestNormalGravityValues(t *testing.T) {
 	}
 }
 
+// 回归：中纬度正常重力必须逐点贴住国际正常重力公式（GRS 1967）标准值。
+// 参考值由公式 γ=g_e·(1+β1·sin²φ−β2·sin²2φ) 独立计算（g_e=9.780318，
+// β1=5.3024e-3，β2=5.9e-6）。sin²(2φ) 项若被误写为正号，赤道与两极
+// 不受影响，但中纬度会被算大约 2·β2·sin²(2φ)·g_e，45° 处达 11.5 mGal，
+// 本表在偏差最大的一带逐点卡住。
+func TestNormalGravity_MidLatitudeReferenceValues(t *testing.T) {
+	cases := []struct {
+		phi  float64
+		want float64 // m/s^2
+	}{
+		{15, 9.783777478918},
+		{30, 9.793239511634},
+		{40, 9.801688991035},
+		{45, 9.806189875205}, // sin²(2φ) 项影响最大的纬度
+		{50, 9.810694239345},
+		{60, 9.819169090715},
+		{75, 9.828688827307},
+		{-45, 9.806189875205}, // 南纬中纬度同样卡住
+	}
+	for _, tc := range cases {
+		if got := NormalGravity(tc.phi); !approxEq(got, tc.want) {
+			t.Fatalf("φ=%v° 正常重力不符国际正常重力公式：want %.12f, got %.12f（差 %.4f mGal）",
+				tc.phi, tc.want, got, (got-tc.want)*1e5)
+		}
+	}
+}
+
+// 回归：全纬度扫描（-90°..90°，步长 0.5°），与用恒等式
+// sin²(2φ)=4·sin²φ·cos²φ 独立写出的参考式逐点比对。
+// 任何只在中纬度冒头的纬度相关偏差（符号、系数、角度单位）
+// 都会被这条曲线卡住，而赤道/两极的正确值不受影响。
+func TestNormalGravity_FullLatitudeSweepMatchesIGF(t *testing.T) {
+	reference := func(phiDeg float64) float64 {
+		phi := phiDeg * math.Pi / 180.0
+		s2 := math.Sin(phi)
+		s2 = s2 * s2 // sin²φ
+		sin2phiSq := 4 * s2 * (1 - s2)
+		return normalGravityEquator * (1 + beta1*s2 - beta2*sin2phiSq)
+	}
+	for phi := -90.0; phi <= 90.0001; phi += 0.5 {
+		if got, want := NormalGravity(phi), reference(phi); !approxEq(got, want) {
+			t.Fatalf("φ=%.1f° 正常重力偏离国际正常重力公式：want %.12f, got %.12f（差 %.4f mGal）",
+				phi, want, got, (got-want)*1e5)
+		}
+	}
+}
+
+// 回归（端到端）：中纬度测点的布格异常手算核对。
+// φ=45°、h=500 m、ρ=2.67 g/cm³、gobs=9.806190 m/s²：
+//
+//	γ(45°) = 9.780318×(1+5.3024e-3×0.5−5.9e-6×1) = 980618.9875205 mGal
+//	Δg_FA  = 0.3086×500          = 154.30 mGal
+//	Δg_B   = 0.04193×2.67×500    = 55.97655 mGal
+//	Δg_Bouguer = 980619.0 − 980618.9875205 + 154.30 − 55.97655
+//	           = 98.3359295 mGal
+//
+// 正常重力若在 45° 被算大 11.5 mGal（sin²(2φ) 项符号错误），
+// 会一比一漏进布格异常，本用例在最终输出上把它卡住。
+func TestBouguerAnomaly_MidLatitudeHandCheck(t *testing.T) {
+	r := ReducePoint(Observation{Gobs: 9.806190, H: 500, Phi: 45, Density: 2.67})
+
+	const wantGamma = 980618.9875205  // mGal
+	const wantAnomaly = 98.3359295    // mGal
+	const mGalTol = 1e-6              // 远小于 11.5 mGal 级回归，远大于浮点噪声
+
+	if d := math.Abs(r.NormalGravity.MGal - wantGamma); d > mGalTol {
+		t.Fatalf("45° 正常重力不符：want %.7f mGal, got %.7f mGal", wantGamma, r.NormalGravity.MGal)
+	}
+	if d := math.Abs(r.BouguerAnomaly.MGal - wantAnomaly); d > mGalTol {
+		t.Fatalf("45° 布格异常不符：want %.7f mGal, got %.7f mGal", wantAnomaly, r.BouguerAnomaly.MGal)
+	}
+}
+
 // 高程扫描：每个点都必须由真实公式独立算出，
 // 且 γ 不变、FA 与 B 随 h 线性变化，不允许退化成写死的直线/常数。
 func TestScanHeights_PointwiseFormula(t *testing.T) {
